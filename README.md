@@ -16,18 +16,17 @@
 
 **Nextcloud Server** `35.0.0` - Nextcloud GmbH
 
-Unpublished Nextcloud source finding: a federated share secret is minted as an unscoped `PERMANENT_TOKEN` app password for the sharer. The recipient API returns it as `refresh_token`. Replaying it as Bearer on the sender WebDAV logs in as the sharer and reads files **that were never shared**.
+A federated share secret is minted as an unscoped `PERMANENT_TOKEN` app password for the sharer. The recipient API returns it as `refresh_token`. Replaying it as Bearer on the sender WebDAV logs in as the sharer and reads files **that were never shared**.
 
 **A bad actor you federated-share one file with can log in as you on your Nextcloud, skip 2FA, and read or overwrite all of your files, not just the one you shared.**
 
 | | |
 |---|---|
-| ID | Unpublished Nextcloud source finding #1 (no CVE yet) |
+| ID | no CVE yet |
 | CWE | [CWE-269, CWE-287](https://cwe.mitre.org/data/definitions/269.html) |
 | CVSS | **Critical: 8.1** `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N` (federated recipient). Public-link convert is worse (no recipient account on a peer). |
 | Product | [Nextcloud Server](https://github.com/nextcloud/server) |
 | Affected | **35.0.0** (`da02f41`) official `nextcloud:35.0.0-apache` |
-| Patched | vendor patch - see references |
 | Auth | federated recipient (or public-link converter) |
 | License | [GNU Affero GPL v3.0](LICENSE) |
 | Lab | `127.0.0.1` only |
@@ -49,13 +48,19 @@ They do not get a PHP shell on the host. They do not need your password. Do not 
 
 ---
 
-## Advisory (from the source map)
+## How I found it
 
-`FederatedShareProvider::createFederatedShare` `generateToken(..., type: PERMANENT_TOKEN)` with no scope. `PublicKeyToken` defaults `SCOPE_FILESYSTEM => true`. `GET /ocs/v2.php/apps/files_sharing/api/v1/remote_shares/pending` returns `refresh_token`. `Session::tryTokenLogin` accepts permanent Bearer and sets `app_password`. OCM access-token hop is rejected on `/remote.php/dav` on this tree.
+A share is supposed to be a share. One file. One folder. I read `FederatedShareProvider::createFederatedShare` on tag v35.0.0. It mints a 32-character secret as `IToken::PERMANENT_TOKEN` for the sharer with no scope. `PublicKeyToken::getScopeAsArray` defaults `SCOPE_FILESYSTEM => true`. That is an app password. `Session::tryTokenLogin` takes a permanent Bearer.
+
+The OCM exchange work (PR #57234 / #57166) already locks filesystem scope **after** the first exchange. An unofficial writeup used that post-exchange hop. I tried it first. On this tree the exchanged token is `TEMPORARY`, named `OCM Access Token`, and `/remote.php/dav` rejects it (`allowOcmAccessToken` false). DAV said no.
+
+So I did not exchange. `ocm_discovery_enabled` stayed false so the recipient would not exchange it for me. Two official `nextcloud:35.0.0-apache` boxes, `overwrite.cli.url` as docker DNS (`http://sender` / `http://recipient`). Leave that at `127.0.0.1` and S2S talks to itself.
+
+Alice shares one file with `bob@http://recipient`. Bob reads pending shares. `refresh_token` length 32. `access_token` length 0. Unauthenticated Bearer GET of Alice's private witness file, never in the share, returned **200**, `X-User-Id: alice`.
 
 ---
 
-## Reproduction (authorized lab)
+## Lab
 
 ```bash
 cd lab
@@ -64,30 +69,26 @@ cd lab
 
 Target **only** `http://127.0.0.1:18340` (sender) and `:18341` (recipient).
 
-Success last line:
-
 ```text
 SUCCESS NEXTCLOUD-OCM-PERMANENT-TOKEN who=federated-recipient uid=alice NEXTCLOUD-OCM-PERMANENT-TOKEN-WITNESS
 ```
-
----
-
-## Lab images
 
 - [`lab/docker-compose.yml`](lab/docker-compose.yml)
 - [`lab/Dockerfile`](lab/Dockerfile)
 - [`lab/run.sh`](lab/run.sh)
 
-Publish nothing except `127.0.0.1`.
+---
+
+## The fix
+
+Mint the federated secret with filesystem scope false from the first insert. Do not accept that secret as Bearer/Basic on `/remote.php/dav`. First exchange already locks FS scope; create should never have handed out an app password.
 
 ---
 
 ## References
 
 - [github.com/nextcloud/server](https://github.com/nextcloud/server) tag [v35.0.0](https://github.com/nextcloud/server/releases/tag/v35.0.0)
-- Nearby OCM work: [PR #57234](https://github.com/nextcloud/server/pull/57234) / [PR #57166](https://github.com/nextcloud/server/pull/57166). TokenController locks FS scope **after** first exchange; create still mints unscoped.
-- Unofficial writeup used the **post-exchange** hop, which this tree rejects on DAV. This pack is the pre-exchange permanent token.
-- Vendor intake: [hackerone.com/nextcloud](https://hackerone.com/nextcloud). Do **not** open a public GitHub issue.
+- Nearby OCM work: [PR #57234](https://github.com/nextcloud/server/pull/57234) / [PR #57166](https://github.com/nextcloud/server/pull/57166)
 - Abraxas Labs: [abraxaslabs.tech](https://abraxaslabs.tech) · [github.com/abraxas](https://github.com/abraxas) · [@abraxas_null](https://x.com/abraxas_null)
 
 ---
